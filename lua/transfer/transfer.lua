@@ -84,13 +84,13 @@ local function build_command(deployment, command, callback)
   end
 
   if deployment.password ~= true and type(deployment.password) ~= "string" then
-    vim.notify('Password must be either a `string` or `true`', vim.log.levels.ERROR)
+    vim.notify("Password must be either a `string` or `true`", vim.log.levels.ERROR)
     callback(false)
     return
   end
 
-  if vim.fn.executable('sshpass') ~= 1 then
-    vim.notify('Password-based authentication requires `sshpass`', vim.log.levels.ERROR)
+  if vim.fn.executable("sshpass") ~= 1 then
+    vim.notify("Password-based authentication requires `sshpass`", vim.log.levels.ERROR)
     callback(false)
     return
   end
@@ -103,10 +103,10 @@ local function build_command(deployment, command, callback)
   end
 
   local function _prompt()
-    vim.ui.input({prompt="Password for "..deployment.host}, function(input)
-      if not input or input == '' then
+    vim.ui.input({ prompt = "Password for " .. deployment.host }, function(input)
+      if not input or input == "" then
         vim.schedule(function()
-          vim.notify('No password was entered, cancelling', vim.log.levels.ERROR)
+          vim.notify("No password was entered, cancelling", vim.log.levels.ERROR)
           callback(false)
         end)
       else
@@ -115,7 +115,7 @@ local function build_command(deployment, command, callback)
     end)
   end
 
-  if type(deployment.password) == 'string' then
+  if type(deployment.password) == "string" then
     _build(deployment.password)
   else
     vim.defer_fn(_prompt, 500) -- defer to ensure input gets focus
@@ -168,7 +168,7 @@ function M.remote_scp_path(local_path, quiet)
         }
       )
     end
-    return nil,nil
+    return nil, nil
   end
   local deployment_conf = dofile(config_file)
   -- remove cwd from local file path
@@ -269,7 +269,7 @@ function M.upload_on_save(local_path)
   end
 
   local function _upload()
-    local _,deployment = M.remote_scp_path(local_path, true)
+    local _, deployment = M.remote_scp_path(local_path, true)
     if deployment and deployment.upload_on_save == true then
       M.upload_file(local_path, _finished)
     else
@@ -281,7 +281,7 @@ function M.upload_on_save(local_path)
   if not ok then
     _finished()
     vim.schedule(function()
-      vim.notify("Error uploading file\n"..tostring(result), vim.log.levels.ERROR)
+      vim.notify("Error uploading file\n" .. tostring(result), vim.log.levels.ERROR)
     end)
   end
 end
