@@ -40,6 +40,8 @@ return {
     "--checksum",
     "--exclude",
     ".git",
+    "--exclude",
+    ".nvim",
   },
 }
 
