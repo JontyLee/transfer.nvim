@@ -22,6 +22,86 @@ local function create_autocmd()
   })
 end
 
+--- Check if snacks.nvim is available for the picker
+--- @return boolean
+local function has_snacks()
+  local ok, _ = pcall(require, "snacks")
+  return ok
+end
+
+--- Show a picker for user to select target(s), with an "All" option.
+--- When `multi = true`, multiple selections are allowed (for upload/download).
+--- When `multi = false`, only one target can be selected (for diff).
+--- @param targets table {name, ...}[]
+--- @param opts {prompt: string, multi: boolean}
+--- @param cb fun(selected_names: string[])
+local function pick_targets(targets, opts, cb)
+  local names = vim.tbl_map(function(t)
+    return t.name
+  end, targets)
+  table.insert(names, 1, "All")
+
+  local function do_select(choices)
+    local selected = {}
+    for _, choice in ipairs(choices) do
+      if choice == "All" then
+        -- return all target names
+        cb(vim.tbl_map(function(t)
+          return t.name
+        end, targets))
+        return
+      end
+      table.insert(selected, choice)
+    end
+    cb(selected)
+  end
+
+  if has_snacks() then
+    local Snacks = require("snacks")
+    Snacks.picker.select(names, {
+      prompt = opts.prompt or "Select target",
+      multi = opts.multi ~= false,
+    }, function(choice)
+      if not choice then
+        return
+      end
+      if type(choice) == "string" then
+        do_select({ choice })
+      else
+        do_select(choice)
+      end
+    end)
+  else
+    vim.ui.select(names, {
+      prompt = opts.prompt or "Select target",
+      -- multi-select via vim.ui.select isn't standard, but some backends support it
+    }, function(choice)
+      if not choice then
+        return
+      end
+      do_select({ choice })
+    end)
+  end
+end
+
+--- Get targets filtered by selected names
+--- @param targets table
+--- @param selected_names string[]
+--- @return table
+local function filter_targets(targets, selected_names)
+  local name_set = {}
+  for _, name in ipairs(selected_names) do
+    name_set[name] = true
+  end
+  local result = {}
+  for _, t in ipairs(targets) do
+    if name_set[t.name] then
+      table.insert(result, t)
+    end
+  end
+  return result
+end
+
 M.setup = function()
   create_autocmd()
 
@@ -29,11 +109,9 @@ M.setup = function()
   vim.api.nvim_create_user_command("TransferInit", function()
     local config = require("transfer.config")
     local template = config.options.config_template
-    -- if template is a function, call it
     if type(template) == "function" then
       template = template()
     end
-    -- if template is a string, split it into lines
     if type(template) == "string" then
       template = vim.fn.split(template, "\n")
     end
@@ -69,33 +147,51 @@ M.setup = function()
     if local_path == nil or local_path == "" then
       local_path = vim.fn.expand("%:p")
     end
-    local remote_path = require("transfer.transfer").remote_scp_path(local_path)
-    if remote_path == nil then
+
+    local transfer = require("transfer.transfer")
+    local targets = transfer.all_matching_scp_paths(local_path)
+    if not targets then
       return
     end
 
-    local config = require("transfer.config")
-    local orig_win = vim.api.nvim_get_current_win()
+    local function do_diff(target)
+      local config = require("transfer.config")
+      local orig_win = vim.api.nvim_get_current_win()
 
-    if config.options.close_diffview_mapping ~= nil then
-      vim.api.nvim_create_autocmd("BufEnter", {
-        pattern = { remote_path },
-        desc = "Add mapping to close diffview",
-        once = true,
-        callback = function()
-          vim.keymap.set("n", config.options.close_diffview_mapping, function()
-            if vim.api.nvim_win_is_valid(orig_win) then
-              vim.api.nvim_win_call(orig_win, function()
-                vim.cmd("diffoff")
-              end)
-            end
-            vim.cmd("diffoff")
-            vim.cmd("bd!")
-          end, { buffer = true, desc = "Close Diffview" })
-        end,
-      })
+      if config.options.close_diffview_mapping ~= nil then
+        vim.api.nvim_create_autocmd("BufEnter", {
+          pattern = { target.scp_path },
+          desc = "Add mapping to close diffview",
+          once = true,
+          callback = function()
+            vim.keymap.set("n", config.options.close_diffview_mapping, function()
+              if vim.api.nvim_win_is_valid(orig_win) then
+                vim.api.nvim_win_call(orig_win, function()
+                  vim.cmd("diffoff")
+                end)
+              end
+              vim.cmd("diffoff")
+              vim.cmd("bd!")
+            end, { buffer = true, desc = "Close Diffview" })
+          end,
+        })
+      end
+      vim.api.nvim_command("silent! diffsplit " .. target.scp_path)
     end
-    vim.api.nvim_command("silent! diffsplit " .. remote_path)
+
+    if #targets == 1 then
+      do_diff(targets[1])
+    else
+      pick_targets(targets, { prompt = "Diff remote against", multi = false }, function(selected)
+        if #selected == 0 then
+          return
+        end
+        local picked = filter_targets(targets, selected)
+        if #picked > 0 then
+          do_diff(picked[1])
+        end
+      end)
+    end
   end, { nargs = "?" })
 
   -- TransferUpload - upload the given file or directory
@@ -108,10 +204,56 @@ M.setup = function()
       path = vim.fn.expand("%:p")
     end
     M.recent_command = "TransferUpload " .. path
-    if vim.fn.isdirectory(path) == 1 then
-      require("transfer.transfer").sync_dir(path, true)
+
+    local transfer = require("transfer.transfer")
+    local is_dir = vim.fn.isdirectory(path) == 1
+    local targets
+
+    if is_dir then
+      -- For dir sync, find all matching targets via the first mapped file pattern
+      -- all_matching_scp_paths works on normalized paths, so we can use the dir path
+      targets = transfer.all_matching_scp_paths(path, true)
     else
-      require("transfer.transfer").upload_file(path)
+      targets = transfer.all_matching_scp_paths(path)
+    end
+    if not targets then
+      return
+    end
+
+    local function do_upload(selected)
+      local picked = filter_targets(targets, selected)
+
+      if #picked == 0 then
+        return
+      end
+
+      local function next_upload(idx)
+        if idx > #picked then
+          return
+        end
+        local t = picked[idx]
+        if is_dir then
+          transfer.sync_dir_to_target(path, true, t, function()
+            vim.schedule(function()
+              next_upload(idx + 1)
+            end)
+          end)
+        else
+          transfer.upload_file_to_target(path, t, function()
+            vim.schedule(function()
+              next_upload(idx + 1)
+            end)
+          end)
+        end
+      end
+
+      next_upload(1)
+    end
+
+    if #targets == 1 then
+      do_upload({ targets[1].name })
+    else
+      pick_targets(targets, { prompt = "Upload to", multi = true }, do_upload)
     end
   end, { nargs = "?" })
 
@@ -125,10 +267,36 @@ M.setup = function()
       path = vim.fn.expand("%:p")
     end
     M.recent_command = "TransferDownload " .. path
-    if vim.fn.isdirectory(path) == 1 then
-      require("transfer.transfer").sync_dir(path, false)
+
+    local transfer = require("transfer.transfer")
+    local targets = transfer.all_matching_scp_paths(path)
+    if not targets then
+      return
+    end
+
+    local function do_download(selected)
+      local picked = filter_targets(targets, selected)
+      if #picked == 0 then
+        return
+      end
+      local function next_download(idx)
+        if idx > #picked then
+          return
+        end
+        local t = picked[idx]
+        transfer.download_file_from_target(path, t, function()
+          vim.schedule(function()
+            next_download(idx + 1)
+          end)
+        end)
+      end
+      next_download(1)
+    end
+
+    if #targets == 1 then
+      do_download({ targets[1].name })
     else
-      require("transfer.transfer").download_file(path)
+      pick_targets(targets, { prompt = "Download from", multi = true }, do_download)
     end
   end, { nargs = "?" })
 
@@ -142,7 +310,27 @@ M.setup = function()
       path = vim.fn.expand("%:p")
     end
     M.recent_command = "TransferDirDiff " .. path
-    require("transfer.transfer").show_dir_diff(path)
+
+    local transfer = require("transfer.transfer")
+    -- DirDiff only makes sense against one target
+    local targets = transfer.all_matching_scp_paths(path, true)
+    if not targets then
+      return
+    end
+
+    local function do_dir_diff(selected)
+      local picked = filter_targets(targets, selected)
+      if #picked == 0 then
+        return
+      end
+      transfer.show_dir_diff_to_target(path, picked[1])
+    end
+
+    if #targets == 1 then
+      do_dir_diff({ targets[1].name })
+    else
+      pick_targets(targets, { prompt = "Dir Diff against", multi = false }, do_dir_diff)
+    end
   end, { nargs = "?" })
 end
 
