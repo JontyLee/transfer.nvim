@@ -20,6 +20,23 @@ Suitable for small projects where there is no need for CI/CD.
   lazy = true,
   cmd = { "TransferInit", "DiffRemote", "TransferUpload", "TransferDownload", "TransferDirDiff", "TransferRepeat" },
   opts = {},
+  init = function()
+    local function load_if_configured()
+      if vim.fn.filereadable(vim.fn.getcwd() .. "/.nvim/deployment.lua") == 1 then
+        require("lazy").load({ plugins = { "transfer.nvim" } })
+      end
+    end
+    vim.api.nvim_create_autocmd("VimEnter", {
+      callback = function()
+        vim.schedule(load_if_configured)
+      end,
+    })
+    vim.api.nvim_create_autocmd("DirChanged", {
+      callback = function()
+        vim.schedule(load_if_configured)
+      end,
+    })
+  end,
 },
 ```
 
@@ -193,6 +210,23 @@ return {
   lazy = true,
   cmd = { "TransferInit", "DiffRemote", "TransferUpload", "TransferDownload", "TransferDirDiff", "TransferRepeat" },
   opts = {},
+  init = function()
+    local function load_if_configured()
+      if vim.fn.filereadable(vim.fn.getcwd() .. "/.nvim/deployment.lua") == 1 then
+        require("lazy").load({ plugins = { "transfer.nvim" } })
+      end
+    end
+    vim.api.nvim_create_autocmd("VimEnter", {
+      callback = function()
+        vim.schedule(load_if_configured)
+      end,
+    })
+    vim.api.nvim_create_autocmd("DirChanged", {
+      callback = function()
+        vim.schedule(load_if_configured)
+      end,
+    })
+  end,
   dependencies = { 'folke/snacks.nvim' },
   specs = {
     {

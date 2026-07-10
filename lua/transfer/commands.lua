@@ -22,85 +22,6 @@ local function create_autocmd()
   })
 end
 
---- Check if snacks.nvim is available for the picker
---- @return boolean
-local function has_snacks()
-  local ok, _ = pcall(require, "snacks")
-  return ok
-end
-
---- Show a picker for user to select target(s), with an "All" option.
---- When `multi = true`, multiple selections are allowed (for upload/download).
---- When `multi = false`, only one target can be selected (for diff).
---- @param targets table {name, ...}[]
---- @param opts {prompt: string, multi: boolean}
---- @param cb fun(selected_names: string[])
-local function pick_targets(targets, opts, cb)
-  local names = vim.tbl_map(function(t)
-    return t.name
-  end, targets)
-  table.insert(names, 1, "All")
-
-  local function do_select(choices)
-    local selected = {}
-    for _, choice in ipairs(choices) do
-      if choice == "All" then
-        -- return all target names
-        cb(vim.tbl_map(function(t)
-          return t.name
-        end, targets))
-        return
-      end
-      table.insert(selected, choice)
-    end
-    cb(selected)
-  end
-
-  if has_snacks() then
-    local Snacks = require("snacks")
-    Snacks.picker.select(names, {
-      prompt = opts.prompt or "Select target",
-      multi = opts.multi ~= false,
-    }, function(choice)
-      if not choice then
-        return
-      end
-      if type(choice) == "string" then
-        do_select({ choice })
-      else
-        do_select(choice)
-      end
-    end)
-  else
-    vim.ui.select(names, {
-      prompt = opts.prompt or "Select target",
-      -- multi-select via vim.ui.select isn't standard, but some backends support it
-    }, function(choice)
-      if not choice then
-        return
-      end
-      do_select({ choice })
-    end)
-  end
-end
-
---- Get targets filtered by selected names
---- @param targets table
---- @param selected_names string[]
---- @return table
-local function filter_targets(targets, selected_names)
-  local name_set = {}
-  for _, name in ipairs(selected_names) do
-    name_set[name] = true
-  end
-  local result = {}
-  for _, t in ipairs(targets) do
-    if name_set[t.name] then
-      table.insert(result, t)
-    end
-  end
-  return result
-end
 
 M.setup = function()
   create_autocmd()
@@ -182,11 +103,11 @@ M.setup = function()
     if #targets == 1 then
       do_diff(targets[1])
     else
-      pick_targets(targets, { prompt = "Diff remote against", multi = false }, function(selected)
+      transfer.pick_targets(targets, { prompt = "Diff remote against", multi = false }, function(selected)
         if #selected == 0 then
           return
         end
-        local picked = filter_targets(targets, selected)
+        local picked = transfer.filter_targets(targets, selected)
         if #picked > 0 then
           do_diff(picked[1])
         end
@@ -221,7 +142,7 @@ M.setup = function()
     end
 
     local function do_upload(selected)
-      local picked = filter_targets(targets, selected)
+      local picked = transfer.filter_targets(targets, selected)
 
       if #picked == 0 then
         return
@@ -253,7 +174,7 @@ M.setup = function()
     if #targets == 1 then
       do_upload({ targets[1].name })
     else
-      pick_targets(targets, { prompt = "Upload to", multi = true }, do_upload)
+      transfer.pick_targets(targets, { prompt = "Upload to", multi = true }, do_upload)
     end
   end, { nargs = "?" })
 
@@ -275,7 +196,7 @@ M.setup = function()
     end
 
     local function do_download(selected)
-      local picked = filter_targets(targets, selected)
+      local picked = transfer.filter_targets(targets, selected)
       if #picked == 0 then
         return
       end
@@ -296,7 +217,7 @@ M.setup = function()
     if #targets == 1 then
       do_download({ targets[1].name })
     else
-      pick_targets(targets, { prompt = "Download from", multi = true }, do_download)
+      transfer.pick_targets(targets, { prompt = "Download from", multi = true }, do_download)
     end
   end, { nargs = "?" })
 
@@ -319,7 +240,7 @@ M.setup = function()
     end
 
     local function do_dir_diff(selected)
-      local picked = filter_targets(targets, selected)
+      local picked = transfer.filter_targets(targets, selected)
       if #picked == 0 then
         return
       end
@@ -329,7 +250,7 @@ M.setup = function()
     if #targets == 1 then
       do_dir_diff({ targets[1].name })
     else
-      pick_targets(targets, { prompt = "Dir Diff against", multi = false }, do_dir_diff)
+      transfer.pick_targets(targets, { prompt = "Dir Diff against", multi = false }, do_dir_diff)
     end
   end, { nargs = "?" })
 end

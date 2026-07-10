@@ -4,6 +4,85 @@ local M = {}
 
 M._saving = {}
 
+--- Check if snacks.nvim is available for the picker
+--- @return boolean
+local function has_snacks()
+  local ok, _ = pcall(require, "snacks")
+  return ok
+end
+
+--- Show a picker for user to select target(s), with an "All" option.
+--- When `multi = true`, multiple selections are allowed (for upload/download).
+--- When `multi = false`, only one target can be selected (for diff).
+--- @param targets table {name, ...}[]
+--- @param opts {prompt: string, multi: boolean}
+--- @param cb fun(selected_names: string[])
+function M.pick_targets(targets, opts, cb)
+  local names = vim.tbl_map(function(t)
+    return t.name
+  end, targets)
+  table.insert(names, 1, "All")
+
+  local function do_select(choices)
+    local selected = {}
+    for _, choice in ipairs(choices) do
+      if choice == "All" then
+        -- return all target names
+        cb(vim.tbl_map(function(t)
+          return t.name
+        end, targets))
+        return
+      end
+      table.insert(selected, choice)
+    end
+    cb(selected)
+  end
+
+  if has_snacks() then
+    local Snacks = require("snacks")
+    Snacks.picker.select(names, {
+      prompt = opts.prompt or "Select target",
+      multi = opts.multi ~= false,
+    }, function(choice)
+      if not choice then
+        return
+      end
+      if type(choice) == "string" then
+        do_select({ choice })
+      else
+        do_select(choice)
+      end
+    end)
+  else
+    vim.ui.select(names, {
+      prompt = opts.prompt or "Select target",
+      -- multi-select via vim.ui.select isn't standard, but some backends support it
+    }, function(choice)
+      if not choice then
+        return
+      end
+      do_select({ choice })
+    end)
+  end
+end
+
+--- Get targets filtered by selected names
+--- @param targets table
+--- @param selected_names string[]
+--- @return table
+function M.filter_targets(targets, selected_names)
+  local name_set = {}
+  for _, name in ipairs(selected_names) do
+    name_set[name] = true
+  end
+  local result = {}
+  for _, t in ipairs(targets) do
+    if name_set[t.name] then
+      table.insert(result, t)
+    end
+  end
+  return result
+end
 -- reloads the buffer after a transfer
 -- refreshes the neo-tree if the buffer is a neo-tree
 -- @param bufnr number
@@ -370,19 +449,33 @@ function M.upload_on_save(local_path)
       _finished()
       return
     end
-    -- upload to each target sequentially
-    local function next_upload(idx)
-      if idx > #to_upload then
+    local function do_upload(selected)
+      local picked = M.filter_targets(to_upload, selected)
+      if #picked == 0 then
         _finished()
         return
       end
-      M.upload_file_to_target(local_path, to_upload[idx], function()
-        vim.schedule(function()
-          next_upload(idx + 1)
+
+      -- upload to each target sequentially
+      local function next_upload(idx)
+        if idx > #picked then
+          _finished()
+          return
+        end
+        M.upload_file_to_target(local_path, picked[idx], function()
+          vim.schedule(function()
+            next_upload(idx + 1)
+          end)
         end)
-      end)
+      end
+      next_upload(1)
     end
-    next_upload(1)
+
+    if #to_upload == 1 then
+      do_upload({ to_upload[1].name })
+    else
+      M.pick_targets(to_upload, { prompt = "Upload on save to", multi = true }, do_upload)
+    end
   end
 
   local ok, result = pcall(_upload)
