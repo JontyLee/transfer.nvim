@@ -3,6 +3,7 @@ local config = require("transfer.config")
 local M = {}
 
 M._saving = {}
+M.session_upload_targets = nil
 
 --- Check if snacks.nvim is available for the picker
 --- @return boolean
@@ -44,7 +45,8 @@ function M.pick_targets(targets, opts, cb)
       prompt = opts.prompt or "Select target",
       multi = opts.multi ~= false,
     }, function(choice)
-      if not choice then
+      if not choice or #choice == 0 then
+        cb(nil)
         return
       end
       if type(choice) == "string" then
@@ -58,7 +60,8 @@ function M.pick_targets(targets, opts, cb)
       prompt = opts.prompt or "Select target",
       -- multi-select via vim.ui.select isn't standard, but some backends support it
     }, function(choice)
-      if not choice then
+      if not choice or choice == "" then
+        cb(nil)
         return
       end
       do_select({ choice })
@@ -450,6 +453,11 @@ function M.upload_on_save(local_path)
       return
     end
     local function do_upload(selected)
+      if not selected or #selected == 0 then
+        _finished()
+        return
+      end
+      M.session_upload_targets = selected
       local picked = M.filter_targets(to_upload, selected)
       if #picked == 0 then
         _finished()
@@ -474,7 +482,24 @@ function M.upload_on_save(local_path)
     if #to_upload == 1 then
       do_upload({ to_upload[1].name })
     else
-      M.pick_targets(to_upload, { prompt = "Upload on save to", multi = true }, do_upload)
+      if M.session_upload_targets and #M.session_upload_targets > 0 then
+        local valid_selected = {}
+        for _, s in ipairs(M.session_upload_targets) do
+          for _, t in ipairs(to_upload) do
+            if t.name == s then
+              table.insert(valid_selected, s)
+              break
+            end
+          end
+        end
+        if #valid_selected > 0 then
+          do_upload(valid_selected)
+          return
+        end
+      end
+      vim.defer_fn(function()
+        M.pick_targets(to_upload, { prompt = "Upload on save to", multi = true }, do_upload)
+      end, 100)
     end
   end
 

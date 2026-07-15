@@ -7,9 +7,18 @@ local function create_autocmd()
   vim.api.nvim_create_autocmd("DirChanged", {
     pattern = { "*" },
     group = augroup,
-    desc = "Clear recent command after changing directory",
+    desc = "Clear recent command and session upload targets after changing directory",
     callback = function()
       M.recent_command = nil
+      require("transfer.transfer").session_upload_targets = nil
+    end,
+  })
+
+  vim.api.nvim_create_autocmd("VimLeavePre", {
+    group = augroup,
+    desc = "Clear session upload targets on exit",
+    callback = function()
+      require("transfer.transfer").session_upload_targets = nil
     end,
   })
 
@@ -142,6 +151,10 @@ M.setup = function()
     end
 
     local function do_upload(selected)
+      if not selected or #selected == 0 then
+        return
+      end
+      transfer.session_upload_targets = selected
       local picked = transfer.filter_targets(targets, selected)
 
       if #picked == 0 then
@@ -253,6 +266,58 @@ M.setup = function()
       transfer.pick_targets(targets, { prompt = "Dir Diff against", multi = false }, do_dir_diff)
     end
   end, { nargs = "?" })
+
+  -- TransferSelectTarget - manually pick the upload-on-save target for this session
+  -- Once selected, subsequent saves skip the picker and use this selection.
+  -- Calling this command again overrides the previous selection.
+  vim.api.nvim_create_user_command("TransferSelectTarget", function()
+    local transfer = require("transfer.transfer")
+    local path = vim.fn.expand("%:p")
+    local targets = transfer.all_matching_scp_paths(path, true)
+    if not targets then
+      vim.notify("No deployment targets found for current file", vim.log.levels.WARN, {
+        title = "Transfer.nvim",
+      })
+      return
+    end
+
+    -- filter to upload_on_save targets only
+    local to_upload = {}
+    for _, t in ipairs(targets) do
+      if t.deployment.upload_on_save == true then
+        table.insert(to_upload, t)
+      end
+    end
+
+    if #to_upload == 0 then
+      vim.notify("No upload_on_save targets found", vim.log.levels.WARN, {
+        title = "Transfer.nvim",
+      })
+      return
+    end
+
+    if #to_upload == 1 then
+      transfer.session_upload_targets = { to_upload[1].name }
+      vim.notify("Session upload target set to: " .. to_upload[1].name, vim.log.levels.INFO, {
+        title = "Transfer.nvim",
+      })
+      return
+    end
+
+    -- Reset session selection so that pick_targets opens fresh
+    transfer.session_upload_targets = nil
+    transfer.pick_targets(to_upload, { prompt = "Select session upload target", multi = true }, function(selected)
+      if not selected or #selected == 0 then
+        return
+      end
+      transfer.session_upload_targets = selected
+      vim.schedule(function()
+        vim.notify("Session upload target(s) set to: " .. table.concat(selected, ", "), vim.log.levels.INFO, {
+          title = "Transfer.nvim",
+        })
+      end)
+    end)
+  end, { nargs = 0 })
 end
 
 return M
