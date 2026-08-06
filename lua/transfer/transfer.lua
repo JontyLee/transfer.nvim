@@ -4,6 +4,7 @@ local M = {}
 
 M._saving = {}
 M.session_upload_targets = nil
+M.session_skip_upload = false
 
 --- Check if snacks.nvim is available for the picker
 --- @return boolean
@@ -24,7 +25,27 @@ function M.pick_targets(targets, opts, cb)
   end, targets)
   table.insert(names, 1, "All")
 
+  local skip_label = nil
+  if opts.skip_upload then
+    skip_label = "󰔟  Skip upload for this session"
+    table.insert(names, skip_label)
+  end
+
   local function do_select(choices)
+    for _, choice in ipairs(choices) do
+      if skip_label and choice == skip_label then
+        M.session_skip_upload = true
+        vim.schedule(function()
+          vim.notify(
+            "Upload on save disabled for this session. Restart nvim to re-enable.",
+            vim.log.levels.INFO,
+            { title = "Transfer.nvim", icon = "󰔟" }
+          )
+        end)
+        cb(nil)
+        return
+      end
+    end
     local selected = {}
     for _, choice in ipairs(choices) do
       if choice == "All" then
@@ -426,6 +447,9 @@ end
 -- @param local_path string
 -- @return void
 function M.upload_on_save(local_path)
+  if M.session_skip_upload then
+    return
+  end
   if M._saving[local_path] then
     return
   end
@@ -498,7 +522,7 @@ function M.upload_on_save(local_path)
         end
       end
       vim.defer_fn(function()
-        M.pick_targets(to_upload, { prompt = "Upload on save to", multi = true }, do_upload)
+        M.pick_targets(to_upload, { prompt = "Upload on save to", multi = true, skip_upload = true }, do_upload)
       end, 100)
     end
   end

@@ -187,7 +187,7 @@ M.setup = function()
     if #targets == 1 then
       do_upload({ targets[1].name })
     else
-      transfer.pick_targets(targets, { prompt = "Upload to", multi = true }, do_upload)
+      transfer.pick_targets(targets, { prompt = "Upload to", multi = true, skip_upload = true }, do_upload)
     end
   end, { nargs = "?" })
 
