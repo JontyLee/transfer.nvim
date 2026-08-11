@@ -6,6 +6,101 @@ M._saving = {}
 M.session_upload_targets = nil
 M.session_skip_upload = false
 
+-- external-change auto upload (files modified outside nvim)
+M._upload_watch_timer = nil
+
+local function is_temp_file(path)
+  local base = vim.fn.fnamemodify(path, ":t")
+  if base == "4913" or base:find("^%.%d+$") then
+    return true
+  end
+  if base:find("%.sw[px]$") or base:find("%~$") then
+    return true
+  end
+  return false
+end
+
+-- Collect local roots (absolute) of mappings that have upload_on_save = true
+-- @return string[] | nil
+local function upload_roots_for_cwd(cwd)
+  local config_file = cwd .. "/.nvim/deployment.lua"
+  if vim.fn.filereadable(config_file) ~= 1 then
+    return nil
+  end
+  local deployment_conf = dofile(config_file)
+  local roots = {}
+  for _, deployment in pairs(deployment_conf) do
+    if deployment.upload_on_save == true and deployment.mappings ~= nil then
+      for _, mapping in pairs(deployment.mappings) do
+        local local_side = mapping["local"]
+        if local_side == nil or local_side == "" or local_side == "/" or local_side == "." then
+          roots[#roots + 1] = cwd
+        else
+          local normalized = local_side:gsub("^/", "")
+          roots[#roots + 1] = cwd .. "/" .. normalized
+        end
+      end
+    end
+  end
+  -- de-duplicate and keep existing dirs only
+  local seen = {}
+  local real = {}
+  for _, r in ipairs(roots) do
+    if not seen[r] and vim.fn.isdirectory(r) == 1 then
+      seen[r] = true
+      real[#real + 1] = r
+    end
+  end
+  return real
+end
+
+local function scan_and_upload()
+  local cwd = vim.loop.cwd()
+  local roots = upload_roots_for_cwd(cwd)
+  if not roots or #roots == 0 then
+    return
+  end
+  local age = math.max(1, math.floor(config.options.watch_max_age_sec or 4))
+  for _, root in ipairs(roots) do
+    local out = vim.fn.system({ "find", root, "-type", "f", "-mmin", "-" .. age })
+    if vim.v.shell_error == 0 then
+      for file in out:gmatch("[^\r\n]+") do
+        if not is_temp_file(file) then
+          M.upload_on_save(file)
+        end
+      end
+    end
+  end
+end
+
+-- Start (or restart) the periodic external-change watcher for the current cwd.
+function M.setup_external_watch()
+  if M._upload_watch_timer then
+    M._upload_watch_timer:stop()
+    M._upload_watch_timer:close()
+    M._upload_watch_timer = nil
+  end
+  if not (config.options.watch_external_changes == true) then
+    return
+  end
+  if not upload_roots_for_cwd(vim.loop.cwd()) then
+    return
+  end
+  local uv = vim.loop
+  local timer = uv.new_timer()
+  local interval = (config.options.watch_scan_interval_sec or 2) * 1000
+  timer:start(interval, interval, vim.schedule_wrap(scan_and_upload))
+  M._upload_watch_timer = timer
+end
+
+function M.stop_external_watch()
+  if M._upload_watch_timer then
+    M._upload_watch_timer:stop()
+    M._upload_watch_timer:close()
+    M._upload_watch_timer = nil
+  end
+end
+
 --- Check if snacks.nvim is available for the picker
 --- @return boolean
 local function has_snacks()

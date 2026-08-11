@@ -11,6 +11,7 @@ local function create_autocmd()
     callback = function()
       M.recent_command = nil
       require("transfer.transfer").session_upload_targets = nil
+      require("transfer.transfer").setup_external_watch()
     end,
   })
 
@@ -19,6 +20,7 @@ local function create_autocmd()
     desc = "Clear session upload targets on exit",
     callback = function()
       require("transfer.transfer").session_upload_targets = nil
+      require("transfer.transfer").stop_external_watch()
     end,
   })
 
@@ -34,6 +36,7 @@ end
 
 M.setup = function()
   create_autocmd()
+  require("transfer.transfer").setup_external_watch()
 
   -- TransferInit - create a config file and open it. Just edit if it already exists
   vim.api.nvim_create_user_command("TransferInit", function()

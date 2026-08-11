@@ -43,6 +43,11 @@ return {
     "--exclude",
     ".nvim",
   },
+  -- Watch for external file changes (modified outside nvim) and auto-upload
+  -- to targets that have upload_on_save = true. Uses a periodic scan (find -mmin).
+  watch_external_changes = false,
+  watch_scan_interval_sec = 2,
+  watch_max_age_sec = 4,
 }
 
 M.options = {}
