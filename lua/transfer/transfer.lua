@@ -71,7 +71,7 @@ local function scan_and_upload()
           local mtime = vim.fn.getftime(file)
           if mtime ~= uploaded_mtime[file] then
             uploaded_mtime[file] = mtime
-            M.upload_on_save(file)
+            M.upload_on_save(file, { automatic = true })
           end
         end
       end
@@ -332,22 +332,27 @@ end
 -- @return table
 function M.excluded_paths_for_dir(deployment, dir)
   local excludedPaths = {}
+  -- remove cwd from local file path
+  local local_path = normalize_local_path(dir)
+  local all = {}
   if deployment and deployment.excludedPaths and #deployment.excludedPaths > 0 then
-    -- remove cwd from local file path
-    local local_path = normalize_local_path(dir)
-    for _, excluded in pairs(deployment.excludedPaths) do
-      excluded = string.gsub(excluded, "^/", "")
-      if path_matches(excluded, local_path) then
-        local s, e = string.find(excluded, local_path, 1, true)
-        if s then
-          excluded = string.sub(excluded, e + 1)
-          excluded = string.gsub(excluded, "^/", "")
-          table.insert(excludedPaths, excluded)
-        end
-      elseif not excluded:find("/") and excluded:find("*") then
-        -- pattern
+    vim.list_extend(all, deployment.excludedPaths)
+  end
+  if config.options.excludedPaths and #config.options.excludedPaths > 0 then
+    vim.list_extend(all, config.options.excludedPaths)
+  end
+  for _, excluded in ipairs(all) do
+    excluded = string.gsub(excluded, "^/", "")
+    if path_matches(excluded, local_path) then
+      local s, e = string.find(excluded, local_path, 1, true)
+      if s then
+        excluded = string.sub(excluded, e + 1)
+        excluded = string.gsub(excluded, "^/", "")
         table.insert(excludedPaths, excluded)
       end
+    elseif not excluded:find("/") and excluded:find("*") then
+      -- pattern
+      table.insert(excludedPaths, excluded)
     end
   end
   return excludedPaths
@@ -376,7 +381,13 @@ function M.all_matching_scp_paths(local_path, quiet)
   local results = {}
   for name, deployment in pairs(deployment_conf) do
     local skip = false
-    if deployment.excludedPaths ~= nil then
+    for _, excluded in pairs(config.options.excludedPaths or {}) do
+      excluded = string.gsub(excluded, "^/", "")
+      if path_matches(local_path, excluded) then
+        skip = true
+      end
+    end
+    if not skip and deployment.excludedPaths ~= nil then
       for _, excluded in pairs(deployment.excludedPaths) do
         excluded = string.gsub(excluded, "^/", "")
         if path_matches(local_path, excluded) then
@@ -465,7 +476,14 @@ function M.remote_scp_path(local_path, quiet)
   local skip_reason
   for name, deployment in pairs(deployment_conf) do
     local skip = false
-    if deployment.excludedPaths ~= nil then
+    for _, excluded in pairs(config.options.excludedPaths or {}) do
+      excluded = string.gsub(excluded, "^/", "")
+      if path_matches(local_path, excluded) then
+        skip_reason = "File is excluded from deployment\non " .. name .. " by rule: " .. excluded
+        skip = true
+      end
+    end
+    if not skip and deployment.excludedPaths ~= nil then
       for _, excluded in pairs(deployment.excludedPaths) do
         excluded = string.gsub(excluded, "^/", "")
         if path_matches(local_path, excluded) then
@@ -546,8 +564,11 @@ end
 -- upload the given file on BufWritePost event
 -- Upload to ALL matching targets that have upload_on_save = true
 -- @param local_path string
+-- @param opts {automatic?: boolean} when automatic (external-change watcher),
+--   never prompt: skip silently when the target is ambiguous
 -- @return void
-function M.upload_on_save(local_path)
+function M.upload_on_save(local_path, opts)
+  opts = opts or {}
   if M.session_skip_upload then
     return
   end
@@ -621,6 +642,11 @@ function M.upload_on_save(local_path)
           do_upload(valid_selected)
           return
         end
+      end
+      if opts.automatic then
+        -- watcher-triggered upload with no session target chosen: skip silently
+        _finished()
+        return
       end
       vim.defer_fn(function()
         M.pick_targets(to_upload, { prompt = "Upload on save to", multi = true, skip_upload = true }, do_upload)

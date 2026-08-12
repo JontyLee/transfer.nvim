@@ -48,6 +48,9 @@ return {
   watch_external_changes = false,
   watch_scan_interval_sec = 2,
   watch_max_age_sec = 4,
+  -- Global excluded paths merged with each deployment's excludedPaths.
+  -- Applied to single-file uploads, downloads and rsync dir transfers.
+  excludedPaths = {},
 }
 
 M.options = {}
