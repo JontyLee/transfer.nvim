@@ -54,6 +54,8 @@ local function upload_roots_for_cwd(cwd)
   return real
 end
 
+local uploaded_mtime = {}
+
 local function scan_and_upload()
   local cwd = vim.loop.cwd()
   local roots = upload_roots_for_cwd(cwd)
@@ -66,7 +68,11 @@ local function scan_and_upload()
     if vim.v.shell_error == 0 then
       for file in out:gmatch("[^\r\n]+") do
         if not is_temp_file(file) then
-          M.upload_on_save(file)
+          local mtime = vim.fn.getftime(file)
+          if mtime ~= uploaded_mtime[file] then
+            uploaded_mtime[file] = mtime
+            M.upload_on_save(file)
+          end
         end
       end
     end
