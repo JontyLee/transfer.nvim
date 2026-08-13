@@ -56,12 +56,37 @@ end
 
 local uploaded_mtime = {}
 
+local git_pause_until_ms = 0
+
+-- True while any repo under the given paths holds a git lock file, which
+-- indicates an index/HEAD-mutating git command (checkout, switch, merge...).
+local function git_lock_detected(paths)
+  for _, p in ipairs(paths) do
+    local gitdir = p .. "/.git"
+    if vim.fn.isdirectory(gitdir) == 1 then
+      local locks = vim.fn.glob(gitdir .. "/*.lock", false, true)
+      if #locks > 0 then
+        return true
+      end
+    end
+  end
+  return false
+end
+
 local function scan_and_upload()
   local cwd = vim.loop.cwd()
   local roots = upload_roots_for_cwd(cwd)
   if not roots or #roots == 0 then
     return
   end
+  -- During git operations (branch switch/checkout/merge), the working tree is
+  -- rewritten in bulk: memoize new mtimes but skip uploads until the dust
+  -- settles, to avoid mass uploads.
+  local pause = config.options.watch_git_pause_sec or 0
+  if pause > 0 and git_lock_detected(roots) then
+    git_pause_until_ms = vim.loop.now() + pause * 1000
+  end
+  local suppressed = vim.loop.now() < git_pause_until_ms
   local age = math.max(1, math.floor(config.options.watch_max_age_sec or 4))
   for _, root in ipairs(roots) do
     local out = vim.fn.system({ "find", root, "-type", "f", "-mmin", "-" .. age })
@@ -71,7 +96,9 @@ local function scan_and_upload()
           local mtime = vim.fn.getftime(file)
           if mtime ~= uploaded_mtime[file] then
             uploaded_mtime[file] = mtime
-            M.upload_on_save(file, { automatic = true })
+            if not suppressed then
+              M.upload_on_save(file, { automatic = true })
+            end
           end
         end
       end

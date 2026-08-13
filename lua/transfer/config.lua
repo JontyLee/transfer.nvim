@@ -51,6 +51,10 @@ return {
   -- Global excluded paths merged with each deployment's excludedPaths.
   -- Applied to single-file uploads, downloads and rsync dir transfers.
   excludedPaths = {},
+  -- Suppress watcher uploads for N seconds after a git lock file (e.g.
+  -- .git/index.lock) is detected, to avoid mass uploads on branch switches.
+  -- 0 disables this protection.
+  watch_git_pause_sec = 3,
 }
 
 M.options = {}
