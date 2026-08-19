@@ -56,7 +56,19 @@ end
 
 local uploaded_mtime = {}
 
+-- Event-driven watcher. fs_event fires trigger immediate (debounced) scans of
+-- the mapped roots; a slow fallback timer covers anything fs_event misses.
+-- During git operations (branch switch / checkout / merge) the working tree is
+-- rewritten in bulk, so uploads are suppressed while git activity is observed
+-- and the new mtimes are memoized -- this avoids mass uploads on branch
+-- switches without the racy lock-file polling of the old implementation.
+M._upload_watch_timer = nil
+M._upload_watch_event = nil
+M._upload_watch_git_handles = nil
+
+local scan_timer = nil
 local git_pause_until_ms = 0
+local git_prev_head = {}
 
 -- True while any repo under the given paths holds a git lock file, which
 -- indicates an index/HEAD-mutating git command (checkout, switch, merge...).
@@ -73,28 +85,78 @@ local function git_lock_detected(paths)
   return false
 end
 
+-- Read the branch pointed to by each repo's .git/HEAD (e.g. "ref: refs/heads/main").
+local function git_heads(paths)
+  local heads = {}
+  for _, p in ipairs(paths) do
+    local head_file = p .. "/.git/HEAD"
+    if vim.fn.filereadable(head_file) == 1 then
+      local lines = vim.fn.readfile(head_file) or {}
+      heads[p] = table.concat(lines, "\n")
+    else
+      heads[p] = ""
+    end
+  end
+  return heads
+end
+
+-- excludedPaths entries that are plain directory names, usable with `find -prune`.
+local function prune_dirs()
+  local dirs = {}
+  for _, excluded in ipairs(config.options.excludedPaths or {}) do
+    excluded = string.gsub(excluded, "^/", "")
+    if excluded ~= "" and not excluded:find("/") and not excluded:find("*") then
+      dirs[#dirs + 1] = excluded
+    end
+  end
+  return dirs
+end
+
 local function scan_and_upload()
   local cwd = vim.loop.cwd()
   local roots = upload_roots_for_cwd(cwd)
   if not roots or #roots == 0 then
     return
   end
-  -- During git operations (branch switch/checkout/merge), the working tree is
-  -- rewritten in bulk: memoize new mtimes but skip uploads until the dust
-  -- settles, to avoid mass uploads.
-  local pause = config.options.watch_git_pause_sec or 0
-  if pause > 0 and git_lock_detected(roots) then
-    git_pause_until_ms = vim.loop.now() + pause * 1000
+  local uv = vim.loop
+  local now = uv.now()
+
+  -- Branch switch / checkout detection: .git/HEAD is rewritten on every branch
+  -- switch, and lock files (index.lock, ...) exist while a git command runs.
+  local head_changed = false
+  local heads = git_heads(roots)
+  for p, h in pairs(heads) do
+    if git_prev_head[p] ~= nil and git_prev_head[p] ~= h then
+      head_changed = true
+    end
+    git_prev_head[p] = h
   end
-  local suppressed = vim.loop.now() < git_pause_until_ms
+
+  local pause = config.options.watch_git_pause_sec or 0
+  if pause > 0 and (head_changed or git_lock_detected(roots)) then
+    -- A git operation is running or just ran. Keep suppressing uploads while
+    -- activity is observed: the window extends on every scan that still sees
+    -- it, and only falls off after things have been quiet.
+    git_pause_until_ms = now + pause * 1000
+  end
+
+  local suppressed = now < git_pause_until_ms
   local age = math.max(1, math.floor(config.options.watch_max_age_sec or 4))
   for _, root in ipairs(roots) do
-    local out = vim.fn.system({ "find", root, "-type", "f", "-mmin", "-" .. age })
+    local cmd = { "find", root }
+    for _, excl in ipairs(prune_dirs()) do
+      vim.list_extend(cmd, { "-name", excl, "-prune", "-o" })
+    end
+    vim.list_extend(cmd, { "-type", "f", "-mmin", "-" .. age, "-print" })
+    local out = vim.fn.system(cmd)
     if vim.v.shell_error == 0 then
       for file in out:gmatch("[^\r\n]+") do
         if not is_temp_file(file) then
           local mtime = vim.fn.getftime(file)
           if mtime ~= uploaded_mtime[file] then
+            -- Memoize the mtime regardless of suppression: files rewritten by
+            -- the git operation will therefore NOT be uploaded once the
+            -- suppression window ends (no mass upload after branch switches).
             uploaded_mtime[file] = mtime
             if not suppressed then
               M.upload_on_save(file, { automatic = true })
@@ -106,22 +168,69 @@ local function scan_and_upload()
   end
 end
 
--- Start (or restart) the periodic external-change watcher for the current cwd.
-function M.setup_external_watch()
-  if M._upload_watch_timer then
-    M._upload_watch_timer:stop()
-    M._upload_watch_timer:close()
-    M._upload_watch_timer = nil
+-- Coalesce bursts of fs events into a single debounced scan.
+local function schedule_scan()
+  if not scan_timer then
+    scan_timer = vim.loop.new_timer()
   end
+  scan_timer:stop()
+  scan_timer:start(400, 0, vim.schedule_wrap(scan_and_upload))
+end
+
+-- Start (or restart) the external-change watcher for the current cwd.
+function M.setup_external_watch()
+  M.stop_external_watch()
   if not (config.options.watch_external_changes == true) then
     return
   end
-  if not upload_roots_for_cwd(vim.loop.cwd()) then
+  local cwd = vim.loop.cwd()
+  local roots = upload_roots_for_cwd(cwd)
+  if not roots or #roots == 0 then
     return
   end
+
   local uv = vim.loop
+  git_prev_head = git_heads(roots)
+
+  -- Primary trigger: recursive fs_event on the cwd, which covers every root
+  -- below it. Recursive on macOS via FSEvents; also sees changes made outside
+  -- nvim (e.g. `git switch` in another terminal).
+  local event = uv.new_fs_event()
+  local ok = pcall(function()
+    event:start(cwd, { recursive = true }, function()
+      schedule_scan()
+    end)
+  end)
+  if ok then
+    M._upload_watch_event = event
+  end
+
+  -- Git activity triggers: watch each repo's .git dir so branch switches and
+  -- lock files are detected even on platforms where the root watch is not
+  -- recursive (inotify).
+  local git_handles = {}
+  local seen_gitdir = {}
+  for _, root in ipairs(roots) do
+    local gitdir = root .. "/.git"
+    if vim.fn.isdirectory(gitdir) == 1 and not seen_gitdir[gitdir] then
+      seen_gitdir[gitdir] = true
+      local h = uv.new_fs_event()
+      local h_ok = pcall(function()
+        h:start(gitdir, {}, function()
+          schedule_scan()
+        end)
+      end)
+      if h_ok then
+        git_handles[#git_handles + 1] = h
+      end
+    end
+  end
+  M._upload_watch_git_handles = git_handles
+
+  -- Fallback: periodic scan for anything fs_event missed (e.g. changes made
+  -- while nvim was suspended). Much slower than the event triggers.
+  local interval = math.max(10, (config.options.watch_scan_interval_sec or 2)) * 1000
   local timer = uv.new_timer()
-  local interval = (config.options.watch_scan_interval_sec or 2) * 1000
   timer:start(interval, interval, vim.schedule_wrap(scan_and_upload))
   M._upload_watch_timer = timer
 end
@@ -132,6 +241,28 @@ function M.stop_external_watch()
     M._upload_watch_timer:close()
     M._upload_watch_timer = nil
   end
+  if scan_timer then
+    scan_timer:stop()
+    scan_timer:close()
+    scan_timer = nil
+  end
+  if M._upload_watch_event then
+    pcall(function()
+      M._upload_watch_event:stop()
+      M._upload_watch_event:close()
+    end)
+    M._upload_watch_event = nil
+  end
+  if M._upload_watch_git_handles then
+    for _, h in ipairs(M._upload_watch_git_handles) do
+      pcall(function()
+        h:stop()
+        h:close()
+      end)
+    end
+    M._upload_watch_git_handles = nil
+  end
+  git_prev_head = {}
 end
 
 --- Check if snacks.nvim is available for the picker
